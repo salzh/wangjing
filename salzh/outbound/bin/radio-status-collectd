@@ -1,0 +1,29 @@
+#!/usr/bin/perl
+$|=1;$!=1;
+#
+while (1 eq 1) {
+	#
+	# get data
+	@raw = `asterisk -rx "konference list" 2>\&1`;
+	$count_sessions = 0;
+	$count_streams = 0;
+	foreach $line (@raw) {
+	        chomp($line);
+		if (index($line,"Duration") ne -1) {next}
+		$tmp = &clean_int(substr($line,20,6));
+		if ($tmp eq "") {next}
+		$tmp--;
+		$tmp = ($tmp<0) ? 0 : $tmp;
+		$count_sessions += $tmp;
+		$count_streams++;
+	}
+	#
+	# print data
+    print  "PUTVAL neyfrota-dev/radio/conferences interval=30 N:$count_streams\n";
+    print  "PUTVAL neyfrota-dev/radio/conference_listeners interval=30 N:$count_sessions\n";
+    #
+    # sleep
+	sleep 1    
+}
+
+

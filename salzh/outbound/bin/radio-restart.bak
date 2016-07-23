@@ -1,0 +1,75 @@
+#/bin/bash
+
+# ================================================
+# open wide system 
+# ================================================
+echo "4096 87380 16777216" > /proc/sys/net/ipv4/tcp_rmem 
+echo "4096 65536 16777216" > /proc/sys/net/ipv4/tcp_wmem 
+echo "410580" > /proc/sys/fs/file-max
+ulimit -u 32768
+ulimit -n 32768
+chmod a+rw /dev/null
+
+
+# ================================================
+# stop all
+# ================================================
+echo "Stop services and clean system"
+/usr/bin/killall /usr/sbin/asterisk 2>/dev/null >/dev/null 
+/usr/bin/killall /usr/bin/perl 2>/dev/null >/dev/null 
+/usr/bin/killall /usr/bin/ssh 2>/dev/null >/dev/null 
+/usr/bin/killall /usr/bin/mplayer 2>/dev/null >/dev/null 
+/usr/bin/killall /usr/bin/mpg123 2>/dev/null >/dev/null 
+/usr/bin/killall /usr/bin/mpg123.bin 2>/dev/null >/dev/null 
+/usr/bin/killall /usr/bin/cat 2>/dev/null >/dev/null 
+/usr/bin/killall cat 2>/dev/null >/dev/null 
+/usr/bin/killall perl 2>/dev/null >/dev/null 
+/usr/bin/killall ssh 2>/dev/null >/dev/null 
+/usr/bin/killall asterisk 2>/dev/null >/dev/null 
+/usr/bin/killall mplayer 2>/dev/null >/dev/null 
+/usr/bin/killall mpg123 2>/dev/null >/dev/null 
+/usr/bin/killall mpg123.bin 2>/dev/null >/dev/null 
+/usr/bin/killall sleep 2>/dev/null >/dev/null 
+sleep 3 2>/dev/null >/dev/null 
+echo ""
+
+
+# ================================================
+# clean database (no need)
+# ================================================
+echo "Clean database"
+su -c "/home/mysqltunnel/connect-tunnel.sh" mysqltunnel 2>/dev/null >/dev/null 
+#sleep 1
+#HOSTID="neyfrota-dev"
+#/bin/echo " update radio_log_listen_session set datetime_stop=now(),  answered_time=(unix_timestamp(now()) - unix_timestamp(datetime_start)) where datetime_start>date_sub(now(), interval 6 hour) and datetime_stop is null and system_host='$HOSTID' " | /usr/bin/mysql --host=127.0.0.1 --user=radio --password=radio radio
+#/bin/echo " update radio_log_listen_session set datetime_stop=datetime_start where datetime_stop is null and system_host='$HOSTID' " | /usr/bin/mysql --host=127.0.0.1 --user=radio --password=radio radio
+#echo ""
+
+
+
+# ================================================
+# start all
+# ================================================
+echo "Start services."
+mkdir /usr/local/owsline/asterisk/log/ 2>/dev/null >/dev/null 
+tail -n 5000 /usr/local/owsline/asterisk/log/asterisk-vvfc.log > /tmp/radio-restart.swap.log
+cat /tmp/radio-restart.swap.log > /usr/local/owsline/asterisk/log/asterisk-vvfc.log
+tail -n 5000 /usr/local/owsline/asterisk/log/app_konference.listener.log > /tmp/radio-restart.swap.log
+cat /tmp/radio-restart.swap.log > /usr/local/owsline/asterisk/log/app_konference.listener.log
+tail -n 5000 /usr/local/owsline/asterisk/log/mpg123.log > /tmp/radio-restart.swap.log
+cat /tmp/radio-restart.swap.log > /usr/local/owsline/asterisk/log/mpg123.log 
+tail -n 5000 /usr/local/owsline/asterisk/log/webservice.log > /tmp/radio-restart.swap.log
+cat /tmp/radio-restart.swap.log > /usr/local/owsline/asterisk/log/webservice.log 
+rm -f /tmp/radio-restart.swap.log
+/usr/sbin/asterisk -vvvvvvvf >>/usr/local/owsline/asterisk/log/asterisk-vvfc.log 2>>/usr/local/owsline/asterisk/log/asterisk-vvfc.log &
+/usr/local/owsline/asterisk/bin/app_konference.listener.pl >>/usr/local/owsline/asterisk/log/app_konference.listener.log 2>>/usr/local/owsline/asterisk/log/app_konference.listener.log &
+/usr/local/owsline/asterisk/bin/webservice.for.remote.asterisk.api.pl daemon --listen http://*:171  >>/usr/local/owsline/asterisk/log/webservice.log 2>>/usr/local/owsline/asterisk/log/webservice.log &  
+sleep 2
+chmod a+rw /var/run/asterisk.ctl
+echo ""
+#ps xa
+netstat -nlptu
+/usr/local/owsline/asterisk/bin/radio-status
+
+
+

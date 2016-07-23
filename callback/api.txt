@@ -1,0 +1,88 @@
+一. API接口定义
+1. originate （发起呼叫）
+请求参数：
+	  action: originate
+	  src: 分机号
+	  dst：目的号
+	  mode： 模式
+	  tid: 请求标识ID
+回复:
+	{"status": xxx, "message": xxx, "tid": xxx}
+	
+2. hangup （挂断呼叫）
+请求参数：action: hangup
+		  tid: 请求标识ID
+回复:
+	{"status": xxx, "message": xxx, "tid": xxx}
+
+3. getrecording （获取录音）
+请求参数：action: getrecording
+		  uid: 通话uniqueid
+回复:
+	{"status": xxx,"file":xxx ,"message": xxx, "size":xxxx}
+	
+4. viewstate （查看当前通话状态)
+请求参数：action: viewstate
+		  tid: 请求标识ID
+回复:
+	{"status":x,"message": xxx, "tid": xxx, "srcstate":xxx,"srcduration":xxx,
+	 "srcfee":xxx,"dststate":xxx, "dstduration":xxx,"dstfee":xxx}
+	 
+ 二. 表结构:
+1. users;
++------------------+--------------+------+-----+---------+-------+
+| Field            | Type         | Null | Key | Default | Extra |
++------------------+--------------+------+-----+---------+-------+
+| extension        | varchar(20)  | NO   |     |         |       |
+| password         | varchar(20)  | YES  |     | NULL    |       |
+| name             | varchar(50)  | YES  |     | NULL    |       |
+| voicemail        | varchar(50)  | YES  |     | NULL    |       |
+| ringtimer        | int(3)       | YES  |     | NULL    |       |
+| noanswer         | varchar(100) | YES  |     | NULL    |       |
+| recording        | varchar(50)  | YES  |     | NULL    |       |
+| outboundcid      | varchar(50)  | YES  |     | NULL    |       |
+| sipname          | varchar(50)  | YES  |     | NULL    |       |
+| noanswer_cid     | varchar(20)  | NO   |     |         |       |
+| busy_cid         | varchar(20)  | NO   |     |         |       |
+| chanunavail_cid  | varchar(20)  | NO   |     |         |       |
+| noanswer_dest    | varchar(255) | NO   |     |         |       |
+| busy_dest        | varchar(255) | NO   |     |         |       |
+| chanunavail_dest | varchar(255) | NO   |     |         |       |
+| mohclass         | varchar(80)  | YES  |     | default |       |
++------------------+--------------+------+-----+---------+-------+
+
+2. cdr;
++---------------+--------------+------+-----+---------------------+-------+
+| Field         | Type         | Null | Key | Default             | Extra |
++---------------+--------------+------+-----+---------------------+-------+
+| calldate      | datetime     | NO   | MUL | 0000-00-00 00:00:00 |       |
+| clid          | varchar(80)  | NO   |     |                     |       |
+| src           | varchar(80)  | NO   |     |                     |       |
+| dst           | varchar(80)  | NO   | MUL |                     |       |
+| dcontext      | varchar(80)  | NO   |     |                     |       |
+| channel       | varchar(80)  | NO   |     |                     |       |
+| dstchannel    | varchar(80)  | NO   |     |                     |       |
+| lastapp       | varchar(80)  | NO   |     |                     |       |
+| lastdata      | varchar(80)  | NO   |     |                     |       |
+| duration      | int(11)      | NO   |     | 0                   |       |
+| billsec       | int(11)      | NO   |     | 0                   |       |
+| disposition   | varchar(45)  | NO   |     |                     |       |
+| amaflags      | int(11)      | NO   |     | 0                   |       |
+| accountcode   | varchar(20)  | NO   | MUL |                     |       |
+| uniqueid      | varchar(32)  | NO   |     |                     |       |
+| userfield     | varchar(255) | NO   |     |                     |       |
+| did           | varchar(50)  | NO   |     |                     |       |
+| recordingfile | varchar(255) | NO   |     |                     |       |
+| cnum          | varchar(40)  | NO   |     |                     |       |
+| cnam          | varchar(40)  | NO   |     |                     |       |
+| outbound_cnum | varchar(40)  | NO   |     |                     |       |
+| outbound_cnam | varchar(40)  | NO   |     |                     |       |
+| dst_cnam      | varchar(40)  | NO   |     |                     |       |
++---------------+--------------+------+-----+---------------------+-------+
+
+三. 文件结构:
+1. mhandler.php 处理通话过程中的逻辑
+2. index.pl 处理API接口请求脚本
+路径: /var/lib/html/api/index.pl
+3. A2B.pm API接口脚本加载的库文件
+路径 /var/lib/html/api/A2B.pm

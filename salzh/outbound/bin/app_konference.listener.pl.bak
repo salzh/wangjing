@@ -1,0 +1,614 @@
+#!/usr/bin/perl
+#======================================================
+# load head
+#======================================================
+use IO::Socket;
+use Switch;
+use Data::Dumper;
+use DBI;
+use Time::Local;
+use Math::Round qw(:all);
+require "/usr/local/owsline/lib/default.include.pl";
+#======================================================
+
+
+#======================================================
+# config
+#======================================================
+$conference_host 	= $host_name;
+$version 			= "1.0.2";
+$debug 				= 0;
+$fork 				= 0;
+$file_pid 			= "/var/run/app_konference.pid";
+$file_log 			= "/usr/local/radio/asterisk/log/app_konference.log";
+$file_log_bkp 		= "/usr/local/radio/asterisk/log/app_konference.log.bkp";
+$host 				= "127.0.0.1";
+$port 				= 5038;
+$user 				= "manager";
+$secret 			= "manager"; 
+$EOL 				= "\015\012";
+$BLANK 				= $EOL x 2;
+%dtmf_buffer 		= ();
+%automute_buffer	= ();
+%poll_buffer		= ();
+%buffer 			= ();
+#======================================================
+
+
+
+#======================================================
+# arguments
+#======================================================
+$arguments = join(" ",@ARGV);
+$arguments = " \L$arguments ";
+if (index($arguments," version ") ne -1) {
+	print $version . "\n";
+	exit;
+}
+if (index($arguments," log ") ne -1) {
+	$debug = 1;
+}
+if (index($arguments," logverbose ") ne -1) {
+	$debug = 1;
+	$|=1;
+}
+if (index($arguments," daemon ") ne -1) {
+	$fork = 1;
+	$|=1;
+}
+if (index($arguments," restart ") ne -1) {
+	open FILE, "$file_pid " or die $!;
+	my @lines = <FILE>;
+	foreach(@lines) {
+		`kill -9 $_` 
+	}
+	close(FILE);
+	unlink("$file_pid");
+}
+#======================================================
+
+
+
+
+#======================================================
+# fork
+#======================================================
+if ($fork == 1) {
+	chdir '/'                 or die "Can't chdir to /: $!";
+	#umask 0;
+	open STDIN, '/dev/null'   or die "Can't read /dev/null: $!";
+	open STDOUT, '>> $file_log' or die "Can't write to $file_log: $!";
+	open STDERR, '>> $file_log' or die "Can't write to $file_log: $!";
+	defined(my $pid = fork)   or die "Can't fork: $!";
+	exit if $pid;
+	setsid                    or die "Can't start a new session: $!";
+	$pid = $$;
+	open FILE, ">", "$file_pid";
+	print FILE $pid;
+	close(FILE);
+}
+$t = getTime();
+if (index($arguments," restart ") ne -1) {
+	print STDERR "$t STATUS: Listener restarted\n";
+}
+#======================================================
+
+
+
+
+#======================================================
+# main loop
+#======================================================
+my @commands;
+reconnect:
+$remote = IO::Socket::INET->new(
+    Proto => 'tcp',
+    PeerAddr=> $host,
+    PeerPort=> $port,
+    Reuse   => 1
+) or die goto reconnect;
+$t = getTime();
+print STDERR "$t STATUS: Connected\n";
+$remote->autoflush(1);
+$logres = login_cmd("Action: Login${EOL}Username: $user${EOL}Secret: $secret${BLANK}");
+$eventcount = 0;
+while (<$remote>) {
+	$_ =~ s/\r\n//g;
+	$_ = trim($_);
+	if ($_ eq "") {
+		if ($finalline =~ /Event/) {
+			# get regular event data
+			$finalline = ltrim($finalline);
+			@raw_data = split(/\;/, $finalline);			
+			%event = ();
+			$t = getTime();
+			foreach(@raw_data) {
+				@l = split(/\: /,$_);
+				$event{$l[0]} = $l[1];
+			}
+			# expand zenofon extra data at "type" field
+			($tmp1,$tmp2,$tmp3,$tmp4) = split(/\|/,$event{Type});
+			$event{ZenofonBillingID} = &clean_int($tmp1);
+			# call action
+			switch ($event{Event}) {
+				case "ConferenceJoin"	{ ConferenceJoin (%event); }
+				case "ConferenceDTMF"	{ ConferenceDTMF (%event); }
+				case "ConferenceLeave"	{ ConferenceLeave(%event); }
+			}
+			$eventcount++;
+		} 
+		$finalline="";
+	}
+	if ($_ ne "") {
+		$line = $_;
+		if ($finalline eq "") {
+			$finalline = $line;
+		} else {
+			$finalline .= ";" . $line;
+		}
+	}
+}
+$t = getTime();
+print STDERR "$t STATUS: Connection Died\n";
+goto reconnect;
+#======================================================
+
+
+#======================================================
+# poll actions
+#======================================================
+sub poll_garbage_collector(){
+	local(%event) = @_;
+	delete($buffer{poll}{$channel_id}{last_votes}{$event{Channel}});
+}
+sub poll_vote(){
+	local($vote,%event) = @_;
+	local($channel_id,$sip_id,$log_id);
+	local($sql,$timestamp_now);
+	local($tmp,$tmp1,$tmp2,$hash,@array);
+	#
+	# check basic
+	$channel_id	= &clean_int($event{ConferenceName});
+	$sip_id		= $event{Channel};
+	$log_id		= &clean_int($event{ZenofonBillingID});
+	if ($channel_id eq "") {return 0}
+	if ($log_id eq "") {return 0}
+	if (index("|0|1|2|3|4|5|6|7|8|9|","|$vote|") eq -1) { return 0; }
+	#
+	# get timestamp now
+	$timestamp_now = time;
+	#$timestamp_now = &get_timestamp_from_database();
+	# TODO: timestamp need comes from DATABASE server and not from local server. 
+	#
+	# read one_vote_per_listener only each 5 seconds (to avoid flood database)
+	if ( ($timestamp_now - $buffer{poll}{$channel_id}{last_read}) > 5) {
+		$buffer{poll}{$channel_id}{last_read} = $timestamp_now ;
+		%hash = &database_select_as_hash("select 1,1,poll_enabled,poll_timestamp,poll_one_vote_per_listener from radio_data_station_channel where id='$channel_id' ","flag,enabled,ts,ovpl");
+		$buffer{poll}{$channel_id}{ts} 	= ($hash{1}{flag} eq 1) ? $hash{1}{ts} : 0; 
+		$buffer{poll}{$channel_id}{ovpl}= ( ($hash{1}{flag} eq 1) && ($hash{1}{ovpl} eq 1) ) ? 1 : 0;
+		$buffer{poll}{$channel_id}{enabled}= ( ($hash{1}{flag} eq 1) && ($hash{1}{enabled} eq 1) ) ? 1 : 0;
+	}
+	if ($buffer{poll}{$channel_id}{enabled} ne 1) {return 0}
+	#
+	# process one vote per listener
+	if ($buffer{poll}{$channel_id}{ovpl} eq 1) {
+		if (exists($buffer{poll}{$channel_id}{last_votes}{$sip_id})) {
+			if ($buffer{poll}{$channel_id}{last_votes}{$sip_id}{ts} >= $buffer{poll}{$channel_id}{ts}) {
+				# one vote per listener is enabled, we have last vote and still same poll, then we need remove this last vote
+				$last_vote = $buffer{poll}{$channel_id}{last_votes}{$sip_id}{v};
+				$sql = "";
+				$sql = ($last_vote eq 0) ? "update radio_data_station_channel set poll_option_0_count = poll_option_0_count-1 where id='$channel_id' and poll_option_0_count > 0 " : $sql; 
+				$sql = ($last_vote eq 1) ? "update radio_data_station_channel set poll_option_1_count = poll_option_1_count-1 where id='$channel_id' and poll_option_1_count > 0 " : $sql; 
+				$sql = ($last_vote eq 2) ? "update radio_data_station_channel set poll_option_2_count = poll_option_2_count-1 where id='$channel_id' and poll_option_2_count > 0 " : $sql; 
+				$sql = ($last_vote eq 3) ? "update radio_data_station_channel set poll_option_3_count = poll_option_3_count-1 where id='$channel_id' and poll_option_3_count > 0 " : $sql; 
+				$sql = ($last_vote eq 4) ? "update radio_data_station_channel set poll_option_4_count = poll_option_4_count-1 where id='$channel_id' and poll_option_4_count > 0 " : $sql; 
+				$sql = ($last_vote eq 5) ? "update radio_data_station_channel set poll_option_5_count = poll_option_5_count-1 where id='$channel_id' and poll_option_5_count > 0 " : $sql; 
+				$sql = ($last_vote eq 6) ? "update radio_data_station_channel set poll_option_6_count = poll_option_6_count-1 where id='$channel_id' and poll_option_6_count > 0 " : $sql; 
+				$sql = ($last_vote eq 7) ? "update radio_data_station_channel set poll_option_7_count = poll_option_7_count-1 where id='$channel_id' and poll_option_7_count > 0 " : $sql; 
+				$sql = ($last_vote eq 8) ? "update radio_data_station_channel set poll_option_8_count = poll_option_8_count-1 where id='$channel_id' and poll_option_8_count > 0 " : $sql; 
+				$sql = ($last_vote eq 9) ? "update radio_data_station_channel set poll_option_9_count = poll_option_9_count-1 where id='$channel_id' and poll_option_9_count > 0 " : $sql;
+				delete($buffer{poll}{$channel_id}{last_votes}{$sip_id});
+				if ($sql ne "") { &database_do($sql); }
+			}
+		}
+	}
+	#
+	# add vote
+	$sql = "";
+	$sql = ($vote eq 0) ? "update radio_data_station_channel set poll_option_0_count = poll_option_0_count+1 where id='$channel_id' " : $sql; 
+	$sql = ($vote eq 1) ? "update radio_data_station_channel set poll_option_1_count = poll_option_1_count+1 where id='$channel_id' " : $sql; 
+	$sql = ($vote eq 2) ? "update radio_data_station_channel set poll_option_2_count = poll_option_2_count+1 where id='$channel_id' " : $sql; 
+	$sql = ($vote eq 3) ? "update radio_data_station_channel set poll_option_3_count = poll_option_3_count+1 where id='$channel_id' " : $sql; 
+	$sql = ($vote eq 4) ? "update radio_data_station_channel set poll_option_4_count = poll_option_4_count+1 where id='$channel_id' " : $sql; 
+	$sql = ($vote eq 5) ? "update radio_data_station_channel set poll_option_5_count = poll_option_5_count+1 where id='$channel_id' " : $sql; 
+	$sql = ($vote eq 6) ? "update radio_data_station_channel set poll_option_6_count = poll_option_6_count+1 where id='$channel_id' " : $sql; 
+	$sql = ($vote eq 7) ? "update radio_data_station_channel set poll_option_7_count = poll_option_7_count+1 where id='$channel_id' " : $sql; 
+	$sql = ($vote eq 8) ? "update radio_data_station_channel set poll_option_8_count = poll_option_8_count+1 where id='$channel_id' " : $sql; 
+	$sql = ($vote eq 9) ? "update radio_data_station_channel set poll_option_9_count = poll_option_9_count+1 where id='$channel_id' " : $sql;
+	if ($sql eq "") {return 0}
+	&database_do($sql);
+	$buffer{poll}{$channel_id}{last_votes}{$sip_id}{v} = $vote;
+	$buffer{poll}{$channel_id}{last_votes}{$sip_id}{ts} = $timestamp_now;
+	# we store last vote and timestamp in memory-buffer to speedup,
+	# but also need save last vote at database, so webinterface can get this information
+	&database_do("update radio_log_session set poll_votes_count=poll_votes_count+1, poll_last_vote_value = '$vote' where id='$log_id' "); 
+	return 1;
+}
+#======================================================
+
+
+#======================================================
+# events callbacks
+#======================================================
+sub ConferenceJoin {
+	local(%event) = @_;
+	local($buf,$appkid,$tmp);
+	foreach (sort keys %event){$buf .= "$_=$event{$_}|";} 
+	$t = getTime();
+	# [Oct 23 20:35:40] JOIN:CLIENT: CallerID=112233|CallerIDName=E90|Channel=SIP/112233-00000000|ConferenceName=21908|Count=1|Event=ConferenceJoin|Flags=LRa151ac|Member=1|Moderators=0|Privilege=user,all|Type=10572204|UniqueID=1319409337.0|ZenofonBillingID=10572204| 
+	$tmp = &clean_int($event{ZenofonBillingID});
+	if ($event{ZenofonBillingID} ne "") {
+		print STDERR "$t JOIN:CLIENT: $buf \n";
+		$sql = "
+		update radio_log_session 
+		set datetime_stop=null, app_konference_sip_channel='$event{Channel}', app_konference_flags='$event{Flags}' , app_konference_member='$event{Member}'  
+		where id = '$tmp'
+		";
+		&database_do($sql);
+		&check_conference_background_music_status($event{ConferenceName});
+	} else {
+		print STDERR "$t JOIN:AGENT: $buf \n";
+	}
+	&do_member_status(%event);	
+}
+sub ConferenceLeave {
+	local(%event) = @_;
+	local($buf,$tmp);
+	foreach (sort keys %event){$buf .= "$_=$event{$_}|";}
+	$tmp = &clean_int($event{ZenofonBillingID});
+	$t = getTime();
+	&poll_garbage_collector(%event);
+	if ($event{ZenofonBillingID} ne "") {
+		print STDERR "$t LEAVE:CLIENT: $buf \n";
+		$sql = "
+		update radio_log_session 
+		set datetime_stop=now(), answered_time=TIME_TO_SEC(TIMEDIFF(now(),datetime_start))
+		where id = '$tmp'
+		";
+		&database_do($sql);
+		&check_conference_background_music_status($event{ConferenceName});
+	} else {
+		print STDERR "$t LEAVE:AGENT: $buf \n";
+	}
+
+	&do_member_status(%event);
+}
+sub ConferenceDTMF {
+	local(%event) = @_;
+	local($tmp,$tmp1,$tmp2,$id,$ts,$digits,$digit,%call_data,%station_data,$user_talk_pin,%channel_data);
+	#
+	# -----------------------------------------------------
+	# digits buffer
+	# -----------------------------------------------------
+	$id = $event{ConferenceName}."|".$event{Channel};
+	$ts = $dtmf_buffer{$id}{ts}; $lt++;$lt--;
+	if ( (time-$ts) > 3) {
+		$dtmf_buffer{$id}{digits} = $event{Key};
+	} else {
+		$dtmf_buffer{$id}{digits} .= $event{Key};
+	} 
+	$dtmf_buffer{$id}{ts} = time;
+	$digits = $dtmf_buffer{$id}{digits};
+	$digit = $event{Key};
+	#$t = getTime();
+	#print STDERR "$t DTMF: sip=$event{Channel}/$event{ZenofonBillingID} digit=$digit digits=$digits   \n";
+	#
+	# -----------------------------------------------------
+	# process digit
+	# -----------------------------------------------------
+	print STDERR "$t DTMF:PRESSED_BY_USER: sip=$event{Channel}/$digit  \n";
+
+	if ($digit eq "*") {
+		# -----------------------------------------------------
+		# * always quit channel
+		# -----------------------------------------------------
+		print STDERR "$t DTMF:EXIT_BY_USER: sip=$event{Channel}/$event{ZenofonBillingID}  \n";
+		&command("Action: Setvar${EOL}Channel: $event{Channel}${EOL}Variable: conference_name${EOL}Value: ${BLANK}");
+		&command("Action: Setvar${EOL}Channel: $event{Channel}${EOL}Variable: conference_type${EOL}Value: 0${BLANK}");
+        #&command("Action: Command${EOL}Command: konference kickchannel $event{Channel} ${BLANK}");
+		&command("Action: Command${EOL}Command: channel redirect $event{Channel} process_call ${BLANK}");
+	} elsif ($digit eq "#") {
+		# -----------------------------------------------------
+		# # is end of line. Time to understand tis digits
+		# -----------------------------------------------------
+		$dtmf_buffer{$id}{digits} = "";
+		$digits = substr($digits,0,-1);
+		# check flood
+		$tmp1 = $dtmf_buffer{$id}{flood_ts}; $tmp++;$tmp--;
+		$dtmf_buffer{$id}{flood_count} = ((time-$tmp1)>60) ? 0 : $dtmf_buffer{$id}{flood_count}+1;
+		$dtmf_buffer{$id}{flood_ts} = time;
+		#print STDERR "$t DTMF:TALK_PIN:DEBUG: flood_count=$dtmf_buffer{$id}{flood_count} flood_ts=$dtmf_buffer{$id}{flood_ts}  \n";
+		if ($dtmf_buffer{$id}{flood_count}>5) {
+			# -------------------------------------
+			# code flood detected
+			# -------------------------------------
+			print STDERR "$t DTMF:TALK_PIN:FLOOD: sip=$event{Channel}/$event{ZenofonBillingID}  \n";
+        	#&command("Action: Command${EOL}Command: konference play sound $event{Channel} beep mute ${BLANK}");
+		} else {
+			# process digits
+			if ( substr($digits,0,4) eq "9999") {
+				# -------------------------------------
+				# magic debug code
+				# -------------------------------------
+				if ($digits eq "99990") {
+					print STDERR "$t DTMF:MAGIC_DEBUG_CODE:99990 set conference_type=0 and restart \n";
+		        	&command("Action: Command${EOL}Command: konference play sound $event{Channel} beep mute ${BLANK}");
+					sleep(1);
+					&command("Action: Setvar${EOL}Channel: $event{Channel}${EOL}Variable: conference_type${EOL}Value: 0${BLANK}");
+					#&command("Action: Command${EOL}Command: konference kickchannel $event{Channel} ${BLANK}");
+					&command("Action: Command${EOL}Command: channel redirect $event{Channel} process_call ${BLANK}");
+				} elsif ($digits eq "99991") {
+					print STDERR "$t DTMF:MAGIC_DEBUG_CODE:99991 set conference_type=1 and restart \n";
+		        	&command("Action: Command${EOL}Command: konference play sound $event{Channel} beep mute ${BLANK}");
+					sleep(1);
+					&command("Action: Setvar${EOL}Channel: $event{Channel}${EOL}Variable: conference_type${EOL}Value: 1${BLANK}");
+					#&command("Action: Command${EOL}Command: konference kickchannel $event{Channel} ${BLANK}");
+					&command("Action: Command${EOL}Command: channel redirect $event{Channel} process_call ${BLANK}");
+				} elsif ($digits eq "99992") {
+					print STDERR "$t DTMF:MAGIC_DEBUG_CODE:99992 set conference_type=2 and restart \n";
+		        	&command("Action: Command${EOL}Command: konference play sound $event{Channel} beep mute ${BLANK}");
+					sleep(1);
+					&command("Action: Setvar${EOL}Channel: $event{Channel}${EOL}Variable: conference_type${EOL}Value: 2${BLANK}");
+					#&command("Action: Command${EOL}Command: konference kickchannel $event{Channel} ${BLANK}");
+					&command("Action: Command${EOL}Command: channel redirect $event{Channel} process_call ${BLANK}");
+				}
+			} elsif ($digits ne "") {
+				# -------------------------------------
+				# any other digits, we need check
+				# -------------------------------------
+				# get call info
+				%call_data = &database_select_as_hash("SELECT 1,1,ani,radio_data_station_id,radio_data_station_channel_id FROM radio_log_session where id='$event{ZenofonBillingID}' ","flag,ani,station_id,channel_id");
+				#print STDERR "$t DTMF:TALK_PIN:DEBUG:  SELECT 1,1,ani,radio_data_station_id FROM radio_log_session where id='$event{ZenofonBillingID}'  \n";
+				%station_data = ();
+				if ($call_data{1}{channel_id} > 0) {
+					%channel_data = &database_select_as_hash("SELECT 1,1,talk_pin FROM radio_data_station_channel where id='$call_data{1}{channel_id}' ","flag,talk_pin");
+					#print STDERR "$t DTMF:TALK_PIN:DEBUG:  SELECT 1,1,talk_pin FROM radio_data_station_channel where id='$call_data{1}{channel_id}' \n";
+				}
+				if ($channel_data{1}{talk_pin} eq $digits) {
+					# talk-pin ok
+					if  (index($event{Flags},"LR") eq 0) {
+						# its listener, so, lets change to talk 
+						print STDERR "$t DTMF:TALK_PIN:UNLOCK: sip=$event{Channel}/$event{ZenofonBillingID} \n";
+						&command("Action: Command${EOL}Command: konference play sound $event{Channel} ows-pin-ok mute ${BLANK}");
+						sleep(1);
+						&command("Action: Setvar${EOL}Channel: $event{Channel}${EOL}Variable: conference_type${EOL}Value: 1${BLANK}");
+						#&command("Action: Command${EOL}Command: konference kickchannel $event{Channel} ${BLANK}");
+						&command("Action: Command${EOL}Command: channel redirect $event{Channel} process_call ${BLANK}");
+					} else {
+						# its not listener, lets kickback to listener
+						print STDERR "$t DTMF:TALK_PIN:LOCK: sip=$event{Channel}/$event{ZenofonBillingID} \n";
+			        	&command("Action: Command${EOL}Command: konference play sound $event{Channel} beep mute ${BLANK}");
+						sleep(1);
+						&command("Action: Setvar${EOL}Channel: $event{Channel}${EOL}Variable: conference_type${EOL}Value: 0${BLANK}");
+						#&command("Action: Command${EOL}Command: konference kickchannel $event{Channel} ${BLANK}");
+						&command("Action: Command${EOL}Command: channel redirect $event{Channel} process_call ${BLANK}");
+					}
+				} else {
+					print STDERR "$t DTMF:TALK_PIN:REJECT_PIN: sip=$event{Channel}/$event{ZenofonBillingID} pin=$digits \n";				
+		        	#&command("Action: Command${EOL}Command: konference play sound $event{Channel} beep mute ${BLANK}");
+				}
+			}
+		}
+	} elsif (index("|0|1|2|3|4|5|6|7|8|9|","|$digit|") ne -1) {
+		# -----------------------------------------------------
+		# 0-9 are votes
+		# -----------------------------------------------------
+		&poll_vote($digit,%event);
+	}
+}
+	#		if ($digits eq "0") {
+	#			# 0 talk pin its always stop talk
+	#			#
+	#			print STDERR "$t DTMF:TALK_PIN:LOCK: sip=$event{Channel}/$event{ZenofonBillingID}  \n";
+	#        	#&command("Action: Command${EOL}Command: konference play sound $event{Channel} beep mute ${BLANK}");
+	#        	&command("Action: Command${EOL}Command: konference mutechannel  $event{Channel} ${BLANK}");
+	#			&check_conference_background_music_status($event{ConferenceName});
+	#elsif ($digit eq "0") { &poll_vote($event{ConferenceName},$event{Channel},$digit); }
+	#elsif ($digit eq "1") { &poll_vote($event{ConferenceName},$event{Channel},$digit); }
+	#} elsif ($digit eq "1") {
+	#	#
+	#	# 2 always rise volume
+	#	print STDERR "$t DTMF:VOLUME:UP: sip=$event{Channel}/$event{ZenofonBillingID}  \n";
+    #  	if ($digits eq $digit) { &command("Action: Command${EOL}Command: konference play sound $event{Channel} beep mute ${BLANK}"); }
+	#	&command("Action: Command${EOL}Command: konference listenvolume $event{Channel} up${BLANK}"); 
+	#} elsif ($digit eq "1") {
+	#	#
+	#	# 1 always lower volume
+	#	print STDERR "$t DTMF:VOLUME:DOWN: sip=$event{Channel}/$event{ZenofonBillingID}  \n";
+    #   	if ($digits eq $digit) { &command("Action: Command${EOL}Command: konference play sound $event{Channel} beep mute ${BLANK}"); }
+	#	&command("Action: Command${EOL}Command: konference listenvolume $event{Channel} down${BLANK}"); 
+#======================================================
+
+
+
+#======================================================
+# owsline library
+#======================================================
+sub check_conference_background_music_status(){
+	local($conference_name) = @_;
+	local($response,$stream_count,$url,%hash,$tmp,$tmp1,$tmp2,@ids_to_mute,$count_talk,$count_streams,$count_lines,$l,$id);
+	$t = getTime();
+	print STDERR "$t DEBUG:check_conference_background_music_status: start \n";
+	#
+	# flood fuse (minimum gap between calls are 5 seconds)
+	$tmp1 = $buffer{ccbm_flood}{$conference_name}{ts}; $tmp1++;$tmp1--;
+	if ( (time-$tmp1) < 5) { return; }
+	$buffer{ccbm_flood}{$conference_name}{ts} = time;
+	print STDERR "$t DEBUG:check_conference_background_music_status: no 5 seconds flood \n";
+	#
+	# dont check private conferences
+	if (substr($conference_name,-1,1) eq "P") {
+		print STDERR "$t DEBUG:check_conference_background_music_status: no need for private conferences \n";
+		return;
+	}
+	#
+	# find station_id and automute flag
+	%hash = &database_select_as_hash("SELECT 1,1,stream_mode,stream_type,stream_url,stream_approved FROM radio_data_station_channel where id='$conference_name' ","flag,mode,type,url,approved");
+	if ($hash{1}{flag} ne 1) {return}
+	$stream_mode	= $hash{1}{mode};
+	$stream_type	= $hash{1}{type};
+	$stream_approved= $hash{1}{approved};
+	$stream_url		= $hash{1}{url};
+	$stream_zurl	= "ZENOFON:$stream_type:$stream_url";
+	print STDERR "$t DEBUG:check_conference_background_music_status: after-query m=$hash{1}{mode} / t=$stream_type / u=$stream_url / z=$stream_zurl \n";
+	#
+	# get stream cont in this conference
+	@stream_members	= ();
+	$count_talk 	= 0;
+	$count_streams 	= 0;
+	$count_lines 	= 0;
+	$response = &asterisk_manager_command_simple("konference list $conference_name"); 
+	foreach $l (split(/\n/,$response)) { 
+		$id = &trim(substr($l,0,18));
+		if (index($id,"User") eq 0) {next}
+		if (index($l,"Ccl") ne -1) {
+			$count_streams++; @stream_members=(@stream_members,$id);
+		} else {
+			if (index($l,"Unmuted") ne -1) { $count_talk++; }
+			
+		}
+		$count_lines++;
+	}
+	print STDERR "$t DEBUG:check_conference_background_music_status: after-count l=$count_lines / s=$count_streams / t=$count_talk / m=$hash{1}{mode}\n";
+	if ($count_lines eq 0) {return}
+	#
+	# check stream up
+	if ( (index("|AUTOMUTE|ALWAYSON|","|$stream_mode|") ne -1) && ($stream_url ne "") && ($stream_type ne "") && ($stream_approved eq 1) ) {
+		if ($count_streams eq 0) {
+			$tmp1 = $check_conference_stream_buffer{streamflood}{$stream_zurl}{ts}; $tmp1++;$tmp1--;
+			$tmp2 = $check_conference_stream_buffer{streamflood}{$stream_zurl}{count}; $tmp2++;$tmp2--;
+			if ((time-$tmp1) > 600) { $tmp1=time; $tmp2=0;} else { $tmp2++ }
+			$check_conference_stream_buffer{streamflood}{$stream_zurl}{ts} = $tmp1;
+			$check_conference_stream_buffer{streamflood}{$stream_zurl}{count} = $tmp2;
+			if ($tmp2 > 3) {
+				print STDERR "$t DEBUG:check_conference_background_music_status: no streams but flood count=$tmp2 and i will not trey to start this stream\n";
+			}  else {
+				print STDERR "$t DEBUG:check_conference_background_music_status: no streams. we need start\n";
+				&app_konference_channel_stream_connect("",$conference_name);
+			}
+		}
+	}
+#	#
+#	# check automute
+#	if ($stream_mode eq "AUTOMUTE") {
+#		if ($count_streams > 0) {
+#			if ($count_talk > 0) {
+#				foreach $id (@stream_members) { $response = &asterisk_manager_command_simple("konference mute $conference_name $id "); }
+#			} else {
+#				foreach $id (@stream_members) { $response = &asterisk_manager_command_simple("konference unmute $conference_name $id "); last; }
+#			}
+#		}
+#	}
+}
+#======================================================
+
+
+sub do_member_status {
+	local (%event) = @_;
+	local ($status);
+	if (substr($event{Flags} ,0 ,1) eq "R") {
+		$status = 'talk';
+	} else {
+		return;
+	}
+
+	print STDERR "$t DEBUG:member status: $status\n";
+
+	%conference = &app_konference_list('', $event{ConferenceName});
+	if ($event{Event} eq 'ConferenceJoin') {
+		for $userid (keys%conference) {
+			#print STDERR "$t DEBUG:$conference{$userid}{flags}:$conference{$userid}{muted}:$conference{$userid}{sip_channel}\n";
+
+			if ($conference{$userid}{flags} eq 'Ccl' && !$conference{$userid}{muted}) {				
+				print STDERR "$t DEBUG:konference mutechannel $conference{$userid}{sip_channel}\n";
+				&asterisk_manager_command_simple("konference mutechannel $conference{$userid}{sip_channel}");
+				&app_konference_channel_recording_connect('', $event{ConferenceName});
+			}
+		}
+	} elsif ($event{Event} eq 'ConferenceLeave') {
+		$talk_count = 0;
+		for $userid (keys%conference) {
+			if (substr($conference{$userid}{flags} ,0 ,1) eq "R") {
+				$talk_count++;
+			}
+		}
+
+		if (!$talk_count) {
+			for $userid (keys%conference) {
+				if ($conference{$userid}{flags}  eq "Ccl" && $conference{$userid}{muted}) {
+					print STDERR "$t DEBUG:konference unmutechannel $conference{$userid}{sip_channel}\n";
+					&asterisk_manager_command_simple("konference unmutechannel $conference{$userid}{sip_channel}");
+					&app_konference_channel_recording_disconnect('', $event{ConferenceName});
+
+				}
+			}
+		}
+	}
+}
+#======================================================
+# john library
+#======================================================
+sub command {
+        my $cmd = @_[0];
+        my $buf="";
+        print $remote $cmd;
+       return $buf; 
+}
+sub getTime {
+	@months = qw(Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec);
+	@weekDays = qw(Sun Mon Tue Wed Thu Fri Sat Sun);
+	($second, $minute, $hour, $dayOfMonth, $month, $yearOffset, $dayOfWeek, $dayOfYear, $daylightSavings) = localtime();
+	$year = 1900 + $yearOffset;
+	if ($hour < 10) {
+		$hour = "0$hour";
+	}
+	if ($minute < 10) {
+		$minute = "0$minute";
+	}
+	if ($second < 10) {
+		$second = "0$second";
+	}
+	$theTime = "[$months[$month] $dayOfMonth $hour:$minute:$second]";
+	return $theTime; 
+}
+sub login_cmd {
+        my $cmd = @_[0];
+        my $buf="";
+        print $remote $cmd;
+        return $buf;
+}
+sub DELETE_trim($) {                                   
+        my $string = shift;                     
+        $string =~ s/^\s+//;                    
+        $string =~ s/\s+$//;            
+        return $string;                         
+}                                               
+sub ltrim($)                             
+{                                
+        my $string = shift;
+        $string =~ s/^\s+//;
+        return $string;
+}       
+sub rtrim($)
+{               
+        my $string = shift;
+        $string =~ s/\s+$//;
+        return $string;
+}
+sub asterisk_debug_print(){
+	local($msg) = @_;
+	print STDERR "$msg \n";
+	
+}
+#======================================================
+ 

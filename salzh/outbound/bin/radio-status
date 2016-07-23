@@ -1,0 +1,42 @@
+#!/usr/bin/perl
+
+# 0         1         2         3         4         5         6         7         8
+# 0123456789.123456789.123456789.123456789.123456789.123456789.123456789.123456789.
+# Name                 Members              Volume               Duration            
+# 21456                1                    0                    00:37:00            
+
+
+@raw = `asterisk -rx "konference list" 2>\&1`;
+$count_sessions = 0;
+$count_streams = 0;
+
+foreach $line (@raw) {
+        chomp($line);
+	if (index($line,"Duration") ne -1) {next}
+	$tmp = &clean_int(substr($line,20,6));
+	if ($tmp eq "") {next}
+	$tmp--;
+	$tmp = ($tmp<0) ? 0 : $tmp;
+	$count_sessions += $tmp;
+	$count_streams++;
+}
+print "Radio conferences: $count_streams\nRadio sessions: $count_sessions\n";
+
+
+
+sub clean_int() {
+  #limpa tudo que nao for letras e numeros
+  local ($old)=@_;
+  local ($new,$pre,$i);
+  $pre="";
+  $old=$old."";
+  if (substr($old,0,1) eq "+") {$pre="+";$old=substr($old,1,1000);}
+  if (substr($old,0,1) eq "-") {$pre="-";$old=substr($old,1,1000);}
+  $new="";
+  $caracterok="1234567890";
+  for ($i=0;$i<length($old);$i++) {if (index($caracterok,substr($old,$i,1))>-1) {$new=$new.substr($old,$i,1);} }
+  return $pre.$new;
+}         
+ 
+
+ 
