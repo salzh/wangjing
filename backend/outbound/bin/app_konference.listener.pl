@@ -9,7 +9,7 @@ use DBI;
 use Time::Local;
 use Math::Round qw(:all);
 use Net::AMQP::RabbitMQ;
-require "/salzh/salzh/outbound/lib/include.pl";
+require "/salzh/backend/outbound/lib/include.pl";
 
 #======================================================
 
@@ -26,8 +26,8 @@ $file_log 			= "/usr/local/radio/asterisk/log/app_konference.log";
 $file_log_bkp 		= "/usr/local/radio/asterisk/log/app_konference.log.bkp";
 $host 				= "127.0.0.1";
 $port 				= 5038;
-$user 				= "pbxware";
-$secret 			= "mrqv30ejf1"; 
+$user 				= "wangjing";
+$secret 			= "wangjing"; 
 $EOL 				= "\015\012";
 $BLANK 				= $EOL x 2;
 %dtmf_buffer 		= ();

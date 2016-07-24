@@ -1,6 +1,6 @@
 use Net::WebSocket::Server;
 use Net::AMQP::RabbitMQ;
-require "/salzh/salzh/outbound/lib/include.pl";
+require "/salzh/backend/outbound/lib/include.pl";
 
 
 my $mq = Net::AMQP::RabbitMQ->new();

@@ -7,7 +7,7 @@
 =cut
 
 
-require "/salzh/salzh/outbound/lib/default.include.pl";
+require "/salzh/backend/outbound/lib/default.include.pl";
 
 
 
