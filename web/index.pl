@@ -28,6 +28,7 @@ validate_ip($ip)  || reply_error("IP=$ip NOT ALLOWED");
 my $action = $cgi->param('action') || reply_error("No action defined");
 my $id	   = $cgi->param('tid') || getid();
 my $ChanDetail = get_allchannel_detail();
+my $calldal = $cgi->param('callback');
 warn Dump($ChanDetail);
 if ($action eq 'originate') {
 	my $src = $cgi->param('src') || reply_error("src not defined");
@@ -200,6 +201,26 @@ if ($action eq 'originate') {
 		print build_reply({status => 0, message => $res->{message}});
 	}
 	exit 0;
+} elsif ($action eq 'dnd') {
+	my $src = $cgi->param('src') || reply_error("src not defined");
+	my $mode = $cgi->param('mode') || 0;
+	my $dst  = ''; my $state = '';
+	if ($mode) {
+		$dst = "*78"; $state = 'enabled';
+	} else { 
+		$dst = "*79"; $state = 'disabled';
+	}
+	
+	
+	my $res = $a2b->sendcommand("action" => 'originate', 'channel' => "local/$dst\@from-internal/n", 	Application => 'echo', Async => '1',
+								"callerid" => "$src", "Timeout" => 30000);
+	#warn Dump($res);
+	if ($res->{Response} ne 'Error') {
+		print build_reply({status => 1, message => "dnd $state", tid=>$id});
+	} else {
+		print build_reply({status => 0, message => $res->{message}});
+	}
+	exit 0;
 } else {
 	reply_error("action=$action not defined, only (originate, hangup, viewstate) supported now");
 }
@@ -249,7 +270,13 @@ sub build_reply {
 
 	#$retstr   .= "</response>";
 
-	return $json_engine->encode($hash);
+	my $json = $json_engine->encode($hash);
+	if ($calldal) {
+		return "$calldal($json)";
+	} else {
+		return $json;
+	}
+	
 }
 
 sub hangup {
